@@ -27,7 +27,7 @@ def render_view(shed: Shed, results: dict[str, ComboResult] | None = None) -> st
     data["fields"] = [asdict(spec) for spec in (*GEOMETRY_FIELDS, *LOAD_FIELDS)]
     data["solver_note"] = platform_note()
     payload = json.dumps(data, allow_nan=False).replace("<", "\\u003c")
-    template = (WEB / "index.html").read_text()
-    script = (WEB / "scene.bundle.js").read_text()
-    css = (WEB / "style.css").read_text()
+    template = (WEB / "index.html").read_text(encoding="utf-8")
+    script = (WEB / "scene.bundle.js").read_text(encoding="utf-8")
+    css = (WEB / "style.css").read_text(encoding="utf-8")
     return template.replace("/* STYLE */", css).replace("/* MODEL */", payload).replace("/* SCENE */", script)
