@@ -45,10 +45,6 @@ def outputs(raw: Any, count: int, operation: str) -> list[Any]:
     return list(raw[:-1])
 
 
-class TableBuildError(EtabsError):
-    pass
-
-
 @dataclass(frozen=True)
 class TableEdit:
     key: str
@@ -57,28 +53,26 @@ class TableEdit:
     rows: list[tuple[str, ...]]
 
 
-def editable_table(database: Any, catalog: dict[str, int], key: str, columns: tuple[str, ...]) -> int | None:
+def editable_table(database: Any, catalog: dict[str, int], key: str, columns: tuple[str, ...]) -> int:
     if catalog.get(key) not in (2, 3):
-        return None
+        raise EtabsError(f"ETABS does not allow importing the {key} table.")
     version, count, fields, _, _, _, writable = outputs(
         database.GetAllFieldsInTable(key, 0, 0, [], [], [], [], []), 7, f"read the {key} schema",
     )
     if count != len(fields) or count != len(writable):
-        raise TableBuildError(f"ETABS returned an incomplete schema for {key}.")
+        raise EtabsError(f"ETABS returned an incomplete schema for {key}.")
     allowed = {field for field, can_import in zip(fields, writable, strict=True) if can_import}
     if not set(columns) <= allowed:
-        return None
+        raise EtabsError(f"The {key} table does not accept the columns this app imports.")
     table_version, _, existing_rows, _ = outputs(
         database.GetTableForEditingArray(key, "", 0, [], 0, []), 4, f"read the {key} edit table",
     )
     if existing_rows or table_version not in (0, version):
-        raise TableBuildError(f"The {key} table is not empty or changed version.")
+        raise EtabsError(f"The {key} table is not empty or changed version.")
     return version
 
 
 def import_tables(database: Any, tables: list[TableEdit]) -> None:
-    if not tables:
-        return
     check(database.CancelTableEditing(), "clear staged database edits")
     try:
         for table in tables:
@@ -93,119 +87,78 @@ def import_tables(database: Any, tables: list[TableEdit]) -> None:
         database.ApplyEditedTables(True, 0, 0, 0, 0, ""), 5, "apply the database edits",
     )
     if fatal or errors:
-        raise TableBuildError(f"ETABS import reported {fatal} fatal errors and {errors} errors. {str(log)[-800:]}")
+        raise EtabsError(f"ETABS import reported {fatal} fatal errors and {errors} errors. {str(log)[-800:]}")
     if warnings:
         logging.getLogger(__name__).warning("ETABS database import: %s", log)
 
 
-def story_elevations(sap: Any) -> list[tuple[float, str]]:
-    count, names, heights, *_ = outputs(
-        sap.Story.GetStories(0, [], [], [], [], [], [], []), 8, "read story elevations",
-    )
-    if len(names) != count + 1 or len(heights) != len(names):
-        raise TableBuildError("ETABS returned incomplete story elevations.")
-    return sorted(zip(heights, names, strict=True))
+def create_points(sap: Any, model: Model, database: Any, catalog: dict[str, int]) -> list[str]:
+    key = "Point Object Connectivity"
+    columns = ("UniqueName", "X", "Y", "Z", "IsSpecial")
+    version = editable_table(database, catalog, key, columns)
+    names = [str(900001 + i) for i in range(len(model.points))]
+    rows = [
+        (name, f"{x:.9f}", f"{y:.9f}", f"{z:.9f}", "Yes")
+        for name, (x, y, z) in zip(names, model.points, strict=True)
+    ]
+    import_tables(database, [TableEdit(key, version, columns, rows)])
+    for name, expected in zip(names, model.points, strict=True):
+        actual = outputs(sap.PointObj.GetCoordCartesian(name, 0.0, 0.0, 0.0), 3, f"verify joint {name}")
+        if not all(isclose(a, b, abs_tol=1e-6) for a, b in zip(actual, expected, strict=True)):
+            raise EtabsError(f"ETABS imported joint {name} at the wrong position.")
+    return names
 
 
-def story_at(stories: list[tuple[float, str]], height: float) -> str:
-    for elevation, name in stories:
-        if height <= elevation + 1e-6:
-            return name
-    raise TableBuildError(f"There is no story at or above elevation {height:g} m.")
-
-
-def create_points(sap: Any, model: Model, table_plan: tuple[Any, dict[str, int], list[tuple[float, str]]] | None) -> tuple[list[str], int]:
-    if table_plan:
-        database, catalog, stories = table_plan
-        key = "Point Object Connectivity"
-        columns = ("UniqueName", "Story", "X", "Y", "Z", "IsSpecial")
-        version = editable_table(database, catalog, key, columns)
-        if version is not None:
-            names = [str(900001 + i) for i in range(len(model.points))]
-            rows = [
-                (name, story_at(stories, z), f"{x:.9f}", f"{y:.9f}", f"{z:.9f}", "Yes")
-                for name, (x, y, z) in zip(names, model.points, strict=True)
-            ]
-            import_tables(database, [TableEdit(key, version, columns, rows)])
-            for name, expected in zip(names, model.points, strict=True):
-                actual = outputs(sap.PointObj.GetCoordCartesian(name, 0.0, 0.0, 0.0), 3, f"verify joint {name}")
-                if not all(isclose(a, b, abs_tol=1e-6) for a, b in zip(actual, expected, strict=True)):
-                    raise TableBuildError(f"ETABS imported joint {name} at the wrong position.")
-            return names, len(names)
-
-    names = []
-    for index, point in enumerate(model.points):
-        name, = outputs(sap.PointObj.AddCartesian(*point, "", f"SHED-J{index + 1:03}"), 1, f"add joint {index + 1}")
-        names.append(str(name))
-    return names, 0
-
-
-def create_frames(sap: Any, model: Model, names: list[str], table_plan: tuple[Any, dict[str, int], list[tuple[float, str]]] | None) -> tuple[list[str], int]:
-    imported: dict[int, str] = {}
-    if table_plan:
-        database, catalog, stories = table_plan
-        columns = ("UniqueName", "Story", "UniquePtI", "UniquePtJ")
-        groups: dict[str, list[tuple[int, tuple[str, ...]]]] = {}
-        for index, member in enumerate(model.members):
-            x1, y1, z1 = model.points[member.start]
-            x2, y2, z2 = model.points[member.end]
-            if isclose(x1, x2, abs_tol=1e-8) and isclose(y1, y2, abs_tol=1e-8):
-                kind = "Column"
-            else:
-                kind = "Beam" if isclose(z1, z2, abs_tol=1e-8) else "Brace"
-            key = f"{kind} Object Connectivity"
-            name = str(910001 + index)
-            row = (name, story_at(stories, max(z1, z2)), names[member.start], names[member.end])
-            groups.setdefault(key, []).append((index, row))
-
-        edits = []
-        for key, entries in groups.items():
-            version = editable_table(database, catalog, key, columns)
-            if version is not None:
-                edits.append(TableEdit(key, version, columns, [row for _, row in entries]))
-                imported.update({index: row[0] for index, row in entries})
-        import_tables(database, edits)
-
+def create_frames(sap: Any, model: Model, names: list[str], database: Any, catalog: dict[str, int]) -> list[str]:
+    columns = ("UniqueName", "UniquePtI", "UniquePtJ")
+    groups: dict[str, list[tuple[str, ...]]] = {}
     frames = []
     for index, member in enumerate(model.members):
-        start, end = names[member.start], names[member.end]
-        section = SECTION_IDS[member.kind]
-        if index in imported:
-            frame = imported[index]
-            actual = outputs(sap.FrameObj.GetPoints(frame, "", ""), 2, f"verify member {frame}")
-            if actual != [start, end]:
-                raise TableBuildError(f"ETABS imported the wrong endpoints for member {frame}.")
-            check(sap.FrameObj.SetSection(frame, section), f"set the section on member {frame}")
-            assigned, _ = outputs(sap.FrameObj.GetSection(frame, "", ""), 2, f"verify the section on member {frame}")
-            if assigned != section:
-                raise TableBuildError(f"ETABS imported the wrong section for member {frame}.")
+        x1, y1, z1 = model.points[member.start]
+        x2, y2, z2 = model.points[member.end]
+        if isclose(x1, x2, abs_tol=1e-8) and isclose(y1, y2, abs_tol=1e-8):
+            kind = "Column"
         else:
-            frame, = outputs(sap.FrameObj.AddByPoint(
-                start, end, "", section, f"SHED-M{index + 1:03}",
-            ), 1, f"add member {index + 1}")
-        frames.append(str(frame))
-    return frames, len(imported)
+            kind = "Beam" if isclose(z1, z2, abs_tol=1e-8) else "Brace"
+        name = str(910001 + index)
+        frames.append(name)
+        groups.setdefault(f"{kind} Object Connectivity", []).append(
+            (name, names[member.start], names[member.end]),
+        )
+
+    # ETABS rejects the frame tables when they are applied together (status 1, empty log), so each gets its own import.
+    for key, rows in groups.items():
+        import_tables(database, [TableEdit(key, editable_table(database, catalog, key, columns), columns, rows)])
+
+    for frame, member in zip(frames, model.members, strict=True):
+        section = SECTION_IDS[member.kind]
+        actual = outputs(sap.FrameObj.GetPoints(frame, "", ""), 2, f"verify member {frame}")
+        expected = [names[member.start], names[member.end]]
+        if set(actual) != set(expected):  # ETABS may swap I and J so the lower joint comes first
+            raise EtabsError(f"ETABS imported the wrong endpoints for member {frame}: expected {expected}, got {actual}.")
+        check(sap.FrameObj.SetSection(frame, section), f"set the section on member {frame}")
+        assigned, _ = outputs(sap.FrameObj.GetSection(frame, "", ""), 2, f"verify the section on member {frame}")
+        if assigned != section:
+            raise EtabsError(f"ETABS imported the wrong section for member {frame}.")
+    return frames
 
 
-def build_geometry(sap: Any, model: Model, use_database: bool) -> tuple[list[str], list[str], str]:
-    plan = None
-    if use_database:
-        database = sap.DatabaseTables
-        count, keys, _, import_types, _ = outputs(database.GetAllTables(0, [], [], [], []), 5, "read editable tables")
-        if count != len(keys) or count != len(import_types):
-            raise TableBuildError("ETABS returned an incomplete table catalog.")
-        plan = (database, dict(zip(keys, import_types, strict=True)), story_elevations(sap))
-    names, point_count = create_points(sap, model, plan)
-    frames, frame_count = create_frames(sap, model, names, plan)
+def build_geometry(sap: Any, model: Model) -> tuple[list[str], list[str], str]:
+    database = sap.DatabaseTables
+    count, keys, _, import_types, _ = outputs(database.GetAllTables(0, [], [], [], []), 5, "read editable tables")
+    if count != len(keys) or count != len(import_types):
+        raise EtabsError("ETABS returned an incomplete table catalog.")
+    catalog = dict(zip(keys, import_types, strict=True))
+    names = create_points(sap, model, database, catalog)
+    frames = create_frames(sap, model, names, database, catalog)
     if len(set(names)) != len(model.points) or not all(names) or int(sap.PointObj.Count()) != len(names):
         raise EtabsError("ETABS merged or omitted joints.")
     if len(set(frames)) != len(model.members) or not all(frames) or int(sap.FrameObj.Count()) != len(frames):
         raise EtabsError("ETABS merged or omitted members.")
-    method = f"Database import · {point_count} joints and {frame_count} members" if point_count or frame_count else "Direct ETABS API"
-    return names, frames, method
+    return names, frames, f"Database import · {len(names)} joints and {len(frames)} members"
 
 
-def build_in_etabs(model_api: Any, model: Model, *, use_database: bool) -> tuple[list[str], str]:
+def build_in_etabs(model_api: Any, model: Model) -> tuple[list[str], str]:
     check(model_api.SetPresentUnits(6), "set kN and m units")
     material = model_api.PropMaterial
     check(material.SetMaterial(STEEL, 1), "define steel")
@@ -228,12 +181,7 @@ def build_in_etabs(model_api: Any, model: Model, *, use_database: bool) -> tuple
         check(model_api.LoadPatterns.Add(pattern, kind, self_weight, True), f"define {pattern}")
 
     points = model_api.PointObj
-    try:
-        names, frames, method = build_geometry(model_api, model, use_database)
-    except Exception as error:
-        if not use_database:
-            raise
-        raise TableBuildError(str(error)) from error
+    names, frames, method = build_geometry(model_api, model)
 
     for name in names:
         check(points.SetGroupAssign(name, JOINT_GROUP), "group the joint")
@@ -294,10 +242,8 @@ def base_reaction(sap: Any, combo: str) -> Point:
     return reaction
 
 
-def analyze(
-    sap: Any, shed: Shed, model: Model, path: Path, *, use_database: bool,
-) -> tuple[dict[str, ComboResult], str]:
-    names, method = build_in_etabs(sap, model, use_database=use_database)
+def analyze(sap: Any, shed: Shed, model: Model, path: Path) -> tuple[dict[str, ComboResult], str]:
+    names, method = build_in_etabs(sap, model)
     check(sap.File.Save(str(path)), "save the model for analysis")
     check(sap.Analyze.SetRunCaseFlag("", False, True), "clear the run selection")
     for pattern, _, _ in PATTERNS:
@@ -375,14 +321,7 @@ def run_shed(shed: Shed, runs: Path) -> tuple[str, dict[str, ComboResult], str]:
         folder = runs.resolve() / run_id
         folder.mkdir(parents=True)
         path = folder / "steel-shed.edb"
-        model = build_model(shed)
-        try:
-            result, method = analyze(model_api, shed, model, path, use_database=True)
-        except TableBuildError as error:
-            # The model belongs to this run. Start from a fresh grid before retrying.
-            logging.getLogger(__name__).warning("Using direct geometry calls: %s", error)
-            initialize(model_api, shed)
-            result, method = analyze(model_api, shed, model, path, use_database=False)
+        result, method = analyze(model_api, shed, build_model(shed), path)
         if not path.is_file():
             raise EtabsError("ETABS did not save the model file.")
         (folder / "complete").touch()

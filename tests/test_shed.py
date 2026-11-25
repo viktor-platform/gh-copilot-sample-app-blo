@@ -62,7 +62,7 @@ class EtabsTests(TestCase):
         self.combo = ROOF_COMBO
         self.sap = SimpleNamespace(SetPresentUnits=Mock(return_value=0))
         for group in ("PropMaterial", "PropFrame", "PointObj", "FrameObj", "GroupDef",
-                      "LoadPatterns", "RespCombo", "File", "Analyze", "Results", "Story", "DatabaseTables"):
+                      "LoadPatterns", "RespCombo", "File", "Analyze", "Results", "DatabaseTables"):
             setattr(self.sap, group, Mock(return_value=0))
         for group, methods in (
             ("PropMaterial", ("SetMaterial", "SetMPIsotropic", "SetWeightAndMass")),
@@ -88,6 +88,41 @@ class EtabsTests(TestCase):
         self.sap.Results.Setup.SetComboSelectedForOutput.side_effect = self.select_combo
         self.sap.Results.JointDispl.side_effect = self.joint_displacements
         self.sap.Results.BaseReact.side_effect = self.base_reaction
+        self.mock_database()
+
+    def mock_database(self):
+        database = self.sap.DatabaseTables
+        point_key = "Point Object Connectivity"
+        frame_keys = ("Beam Object Connectivity", "Column Object Connectivity", "Brace Object Connectivity")
+        keys = [point_key, *frame_keys]
+        database.GetAllTables.return_value = [4, keys, keys, [2] * 4, [True] * 4, 0]
+        point_fields = ["UniqueName", "Story", "X", "Y", "Z", "IsSpecial", "GUID"]
+        frame_fields = ["UniqueName", "Story", "UniquePtI", "UniquePtJ"]
+        metadata = {point_key: point_fields, **{key: frame_fields for key in frame_keys}}
+        read_only = {"Story", "GUID"}  # ETABS derives Story from the geometry
+        database.GetAllFieldsInTable.side_effect = lambda key, *_: [
+            1, len(metadata[key]), metadata[key], [], [], [],
+            [field not in read_only for field in metadata[key]], 0,
+        ]
+        database.GetTableForEditingArray.return_value = [1, [], 0, [], 0]
+        database.CancelTableEditing.return_value = 0
+        database.ApplyEditedTables.return_value = [0, 0, 0, 0, "", 0]
+
+        def import_rows(key, version, columns, count, flat):
+            self.assertEqual(version, 1)
+            self.assertNotIn("GUID", columns)
+            self.assertNotIn("Story", columns)
+            self.assertEqual(len(flat), len(columns) * count)
+            for offset in range(0, len(flat), len(columns)):
+                row = dict(zip(columns, flat[offset:offset + len(columns)], strict=True))
+                name = row["UniqueName"]
+                if key == point_key:
+                    self.points[name] = tuple(float(row[axis]) for axis in "XYZ")
+                else:
+                    self.frames[name] = (row["UniquePtI"], row["UniquePtJ"])
+            return [version, columns, flat, 0]
+
+        database.SetTableForEditingArray.side_effect = import_rows
 
     def add_point(self, x, y, z, _, name):
         self.points[name] = (x, y, z)
@@ -118,8 +153,8 @@ class EtabsTests(TestCase):
         return [1, [self.combo], [""], [0], [rx], [0], [100], [0], [0], [0], 0, 0, 0, 0]
 
     def test_typed_calls_apply_loads_and_read_both_combinations(self):
-        results, method = analyze(self.sap, self.shed, self.model, Path("fixture.edb"), use_database=False)
-        self.assertEqual(method, "Direct ETABS API")
+        results, method = analyze(self.sap, self.shed, self.model, Path("fixture.edb"))
+        self.assertTrue(method.startswith("Database import"))
         self.assertEqual(list(results), [ROOF_COMBO, WIND_COMBO])
         self.assertEqual(results[ROOF_COMBO]["max_displacement_mm"], 2)
         self.assertEqual(results[ROOF_COMBO]["translations_m"][0], (0, 0, 0))
@@ -132,44 +167,16 @@ class EtabsTests(TestCase):
             translations(self.joint_displacements(), ["J1", "J2"], ROOF_COMBO)
 
     def test_database_geometry_import_and_readback(self):
-        database = self.sap.DatabaseTables
-        point_key = "Point Object Connectivity"
-        frame_keys = ("Beam Object Connectivity", "Column Object Connectivity", "Brace Object Connectivity")
-        keys = [point_key, *frame_keys]
-        database.GetAllTables.return_value = [4, keys, keys, [2] * 4, [True] * 4, 0]
-        self.sap.Story.GetStories.return_value = [
-            2, ["Base", "Eave", "Ridge"], [0, self.shed.eave_height, self.shed.eave_height + self.shed.rise],
-            [], [], [], [], [], 0,
-        ]
-        point_fields = ["UniqueName", "Story", "X", "Y", "Z", "IsSpecial", "GUID"]
-        frame_fields = ["UniqueName", "Story", "UniquePtI", "UniquePtJ"]
-        metadata = {point_key: point_fields, **{key: frame_fields for key in frame_keys}}
-        database.GetAllFieldsInTable.side_effect = lambda key, *_: [
-            1, len(metadata[key]), metadata[key], [], [], [],
-            [field != "GUID" for field in metadata[key]], 0,
-        ]
-        database.GetTableForEditingArray.return_value = [1, [], 0, [], 0]
-        database.CancelTableEditing.return_value = 0
-        database.ApplyEditedTables.return_value = [0, 0, 0, 0, "", 0]
-
-        def import_rows(key, version, columns, count, flat):
-            self.assertEqual(version, 1)
-            self.assertNotIn("GUID", columns)
-            self.assertEqual(len(flat), len(columns) * count)
-            for offset in range(0, len(flat), len(columns)):
-                row = dict(zip(columns, flat[offset:offset + len(columns)], strict=True))
-                name = row["UniqueName"]
-                if key == point_key:
-                    self.points[name] = tuple(float(row[axis]) for axis in "XYZ")
-                else:
-                    self.frames[name] = (row["UniquePtI"], row["UniquePtJ"])
-            return [version, columns, flat, 0]
-
-        database.SetTableForEditingArray.side_effect = import_rows
-        names, frames, method = build_geometry(self.sap, self.model, True)
+        names, frames, method = build_geometry(self.sap, self.model)
         self.assertEqual(method, f"Database import · {len(self.model.points)} joints and {len(self.model.members)} members")
         self.assertEqual(len(names), len(self.model.points))
         self.assertEqual(len(frames), len(self.model.members))
-        self.assertEqual(database.ApplyEditedTables.call_count, 2)
+        self.assertEqual(self.sap.DatabaseTables.ApplyEditedTables.call_count, 4)  # points, then one import per frame table
         self.sap.PointObj.AddCartesian.assert_not_called()
         self.sap.FrameObj.AddByPoint.assert_not_called()
+
+    def test_unimportable_table_fails_without_direct_api_fallback(self):
+        self.sap.DatabaseTables.GetAllTables.return_value = [1, ["Point Object Connectivity"], ["x"], [0], [True], 0]
+        with self.assertRaises(EtabsError):
+            build_geometry(self.sap, self.model)
+        self.sap.PointObj.AddCartesian.assert_not_called()

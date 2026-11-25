@@ -14,7 +14,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe server.py
 ```
 
-Open [http://127.0.0.1:8011](http://127.0.0.1:8011). Edit the inputs and select **Create and run in ETABS**. The app opens a new model, uses editable database tables where supported, and uses direct API calls for the remaining geometry. Select **Download ETABS model** to get the `.edb`.
+Open [http://127.0.0.1:8011](http://127.0.0.1:8011). Edit the inputs and select **Create and run in ETABS**. The app opens a new model and imports the geometry through ETABS editable database tables. Select **Download ETABS model** to get the `.edb`.
 
 The deformation view starts with **Roof · D + Lr**. Select **Wind · D + W** to change the combination. Blue shows low joint displacement and red shows the maximum, in millimetres. Select **1×** for true scale.
 
