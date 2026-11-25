@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "esbuild scene.js --bundle --minify --legal-comments=inline --outfile=scene.bundle.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "three": "0.185.0"
+  }
+}

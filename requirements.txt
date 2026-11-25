@@ -1,0 +1,2 @@
+# Required for the ETABS connection on Windows.
+comtypes>=1.4,<2; sys_platform == "win32"

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steel shed · ETABS</title>
+  <style>/* STYLE */</style>
+</head>
+<body>
+  <main class="workspace">
+    <section class="model" aria-label="Shed model">
+      <header>
+        <div>
+          <h1>Steel shed</h1>
+          <p id="dimensions"></p>
+          <p id="load-detail"></p>
+        </div>
+        <div class="views" aria-label="Camera presets">
+          <button type="button" data-view="3d" aria-pressed="true">3D</button>
+          <button type="button" data-view="gable" aria-pressed="false">Gable</button>
+          <button type="button" data-view="roof" aria-pressed="false">Roof plan</button>
+        </div>
+      </header>
+      <div id="viewport">
+        <p id="scene-message" role="status">Loading the 3D model…</p>
+      </div>
+      <div class="controls">
+        <label>Load arrows
+          <select id="loads">
+            <option value="roof">Roof loads</option>
+            <option value="wind">Wind loads</option>
+            <option value="none">Hide</option>
+          </select>
+        </label>
+        <div class="result-controls" id="result-controls" hidden>
+          <label>Combination
+            <select id="combo"></select>
+          </label>
+          <label>Shape
+            <select id="shape">
+              <option value="auto">Deformed · auto scale</option>
+              <option value="true">Deformed · 1×</option>
+              <option value="original">Original</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="legend" id="part-legend">
+        <span class="swatch chord">UB chords / purlins</span>
+        <span class="swatch column">UC columns</span>
+        <span class="swatch web">CHS webs</span>
+        <span class="swatch brace">CHS bracing</span>
+      </div>
+      <div class="legend heatmap" id="heatmap" hidden>
+        <div>
+          <strong>Joint displacement</strong>
+          <p id="scale-note"></p>
+        </div>
+        <div class="scale">
+          <div class="ramp" aria-hidden="true"></div>
+          <div class="ticks"><span>0 mm</span><span id="max-displacement"></span></div>
+        </div>
+      </div>
+    </section>
+    <aside class="local-inputs" id="local-inputs" hidden>
+      <h2>Shed inputs</h2>
+      <p id="solver-note"></p>
+      <form id="model-form">
+        <div id="fields" class="fields"></div>
+        <div class="actions">
+          <button type="submit" class="primary" id="run-etabs" disabled>Create and run in ETABS</button>
+        </div>
+        <a id="model-link" hidden>Download ETABS model</a>
+        <p id="input-message" role="status"></p>
+      </form>
+    </aside>
+  </main>
+  <script type="application/json" id="model-data">/* MODEL */</script>
+  <script>/* SCENE */</script>
+</body>
+</html>
